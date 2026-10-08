@@ -42,28 +42,37 @@ SOCKS5 示例把 `type` 改为 `socks5`，并填写 v2rayN 实际 SOCKS 端口�
 
 `ssl_insecure` 默认是 `false`。只有在你明确知道上游服务器证书有问题时才应启用；它与安装 mitmproxy CA 不是一回事。
 
-## 3. 首次启动与 CA 证书
+## 3. 首次启动与 CA 证书（Windows）
 
-mitmproxy 需要一个本机 CA 证书，才能解密经它转发的 HTTPS 流量。WechatVideoSniffer 的 Python 环境包含 mitmproxy；首次启动监控时会生成证书文件，不需要另行安装独立的 mitmproxy 软件。证书通常位于当前 Windows 用户目录下的 `%USERPROFILE%\.mitmproxy`。
+### 为什么需要安装证书
 
-在自己的测试电脑上按以下步骤安装：
+GUI 开始监控时，会把当前 Windows 用户的系统代理临时指向 `127.0.0.1:8888`。HTTPS 连接经过 mitmproxy 时，mitmproxy 会为目标网站生成一张临时证书。Windows/浏览器只有信任 mitmproxy 的根 CA，才会接受这张临时证书并继续打开页面。
 
-1. 启动 GUI 并点击 **Start monitoring** 一次，让程序生成证书；随后可以先点 **Stop monitoring**。
-2. 在资源管理器地址栏输入 `%USERPROFILE%\.mitmproxy`，找到 `mitmproxy-ca-cert.cer` 并双击。
-3. 在证书向导中选择 **Current User（当前用户）**，再选择 **Place all certificates in the following store（将所有证书放入下列存储）**，指定 **Trusted Root Certification Authorities（受信任的根证书颁发机构）**，完成导入。
-4. 按 **Win + R**，输入 `certmgr.msc`。确认在 **Current User → Trusted Root Certification Authorities → Certificates** 中能找到 `mitmproxy`。
-5. 关闭并重新打开浏览器或微信，再启动监控测试 HTTPS。
+WechatVideoSniffer 的 Python 虚拟环境已包含 mitmproxy，不需要另行安装独立的 mitmproxy 软件。首次启动监控时，mitmproxy 会在运行程序的 Windows 用户目录下生成 CA 文件，通常是 `%USERPROFILE%\.mitmproxy`。如果 GUI 是用另一个 Windows 账户启动的，每个账户的证书目录和信任存储都不同。
 
-**不要导入 `.p12` 文件。** `http://mitm.it` 的 Windows 下载按钮提供的是 `.p12`，其中包含私钥，Windows 导入时会要求私钥密码；这不是这里要安装的文件。请使用本机目录中的 `mitmproxy-ca-cert.cer`，不要选择 `.pem` 或 `.p12`。`http://mitm.it` 只有在浏览器流量经过正在运行的代理时才能访问。
+### 安装本机生成的 `.cer`
 
-常见情况：
+1. 用平常启动程序的 Windows 账户打开 GUI，点击 **Start monitoring** 一次。确认程序正常启动后，点 **Stop monitoring**。
+2. 打开文件资源管理器，在地址栏输入 `%USERPROFILE%\.mitmproxy` 并按回车。找到 **`mitmproxy-ca-cert.cer`**。不要选 `mitmproxy-ca-cert.p12`、`mitmproxy-ca.p12` 或任何 `.pem` 文件。
+3. 双击 `mitmproxy-ca-cert.cer`。在证书窗口点击 **Install Certificate...（安装证书）**。
+4. 选择 **Current User（当前用户）**，点击“下一步”。选择 **Place all certificates in the following store（将所有证书放入下列存储）**，点击“浏览”。
+5. 在证书存储列表中选 **Trusted Root Certification Authorities（受信任的根证书颁发机构）**，确认后继续“下一步”。
+6. 出现安全警告时，先确认当前导入文件的完整路径是 `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer`，证书信息显示 **Issued to（颁发给）** 和 **Issued by（颁发者）** 都是 `mitmproxy`。只在这确实是本机程序生成的文件时点击 **Yes（是）**。根 CA 可以让系统信任它签发的证书；不要对来源不明的 CA 点“是”。
+7. 完成导入后，按 **Win + R**，输入 `certmgr.msc` 并回车。展开 **Certificates - Current User（证书 - 当前用户）→ Trusted Root Certification Authorities（受信任的根证书颁发机构）→ Certificates（证书）**，按名称查找 `mitmproxy`。
+8. 关闭并重新打开浏览器和微信，再启动监控测试 HTTPS。
 
-- 浏览器显示 `NET::ERR_CERT_AUTHORITY_INVALID`：证书还没安装、放错了证书存储，或浏览器/微信尚未重启。回到上面的证书管理器路径确认 `mitmproxy` 是否存在。
-- 输入 `http://` 地址后仍出现证书错误：网站可能自动跳转到了 `https://`；HTTP 本身没有证书，错误来自跳转后的 HTTPS 连接。
-- `%USERPROFILE%\.mitmproxy` 里没有 `.cer`：确认用同一个 Windows 账户启动程序，并先启动一次监控。不要用另一个账户或“以其他用户身份运行”来生成和安装证书。
-- 证书已安装、普通浏览器 HTTPS 正常，但小程序无法播放或无法捕获：应用可能使用独立证书校验、证书固定或其他不兼容网络机制；安装 CA 不会绕过这些限制。
+### 刚才容易踩到的坑
 
-安装根证书意味着 Windows 会信任该 CA 签发的证书，因此只在自己的测试电脑上安装。测试结束后若不再使用，可在上述证书管理器中删除 `mitmproxy`。不要分享 `.mitmproxy` 目录中的私钥文件。
+- **Windows 下载页给的是 `.p12`，导入时要求私钥密码。** 这是因为 `.p12` 包含私钥，不是本项目推荐安装的文件。遇到密码框请点“取消”，改用本机目录里的 `mitmproxy-ca-cert.cer`。不要猜密码，也不要把 Windows 登录密码填进去。
+- **打开 `.cer` 只是查看证书，不等于已经安装。** 需要继续点击“安装证书”，并明确选择“当前用户”和“受信任的根证书颁发机构”。完成后再用 `certmgr.msc` 确认；列表中找不到 `mitmproxy` 就表示当前用户的根证书存储里还没有它。
+- **出现 `NET::ERR_CERT_AUTHORITY_INVALID`。** 常见原因是证书未导入、导入到了错误的存储位置、程序与证书使用了不同的 Windows 账户，或浏览器/微信还没重启。按上面的 `certmgr.msc` 路径检查。
+- **输入 `http://` 后也出现证书错误。** 地址可能被网站自动跳转成 `https://`；HTTP 本身没有证书，错误发生在跳转后的 HTTPS 连接。查看浏览器地址栏最终显示的协议。
+- **`%USERPROFILE%\.mitmproxy` 中没有 `.cer`。** 先用运行 GUI 的同一 Windows 账户启动一次监控，再检查该目录。不要以其他用户身份运行程序后，又在当前账户的证书存储中查找。
+- **浏览器可以打开 HTTPS，但微信小程序仍不能播放或捕捉。** 这表示系统 CA 已被浏览器接受，但微信可能使用独立证书校验、证书固定、QUIC/HTTP3 或其他网络机制。安装 CA 不会绕过这些限制。
+- **显示 `Port already in use: 127.0.0.1:8888`。** 已有程序正在监听本地端口。先关闭另一个 WechatVideoSniffer 实例或占用该端口的程序；不要把上游代理端口配置成 `8888`，否则会冲突或形成代理环路。
+- **视频能播放，但“Download list”为空。** 捕捉到的视频 URL 会写入 GUI 实时日志和 `logs/videos.log`；“Download list”显示的是下载任务。若关闭了自动下载，捕捉成功也不会自动产生下载任务。
+
+只在自己的测试电脑上安装本机 CA。测试结束后若不再使用，可在上述证书管理器位置删除 `mitmproxy`。不要分享 `%USERPROFILE%\.mitmproxy` 中的私钥文件（尤其是 `.p12`）。
 
 ## 4. 让流量经过本工具
 
