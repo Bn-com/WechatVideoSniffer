@@ -13,6 +13,21 @@ from typing import Any
 APP_NAME = "WechatVideoSniffer"
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = BASE_DIR / "config.json"
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "listen_host": "127.0.0.1",
+    "listen_port": 8888,
+    "upstream_proxy": {
+        "enabled": False,
+        "host": "127.0.0.1",
+        "port": 10808,
+        "type": "http",
+    },
+    "log_file": "logs/videos.log",
+    "ssl_insecure": False,
+    "auto_download": False,
+    "output_dir": "output",
+    "auto_download_catalog": False,
+}
 
 
 class ConfigError(Exception):
@@ -23,10 +38,23 @@ def load_config(path: Path) -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8-sig") as file:
             config = json.load(file)
-    except FileNotFoundError as exc:
-        raise ConfigError(f"Config file not found: {path}") from exc
+    except FileNotFoundError:
+        # Configuration is optional. Defaults keep the app usable without v2rayN.
+        config = {}
     except json.JSONDecodeError as exc:
         raise ConfigError(f"Invalid JSON in {path}: {exc}") from exc
+
+    if not isinstance(config, dict):
+        raise ConfigError("Config must be a JSON object")
+    upstream_override = config.get("upstream_proxy", {})
+    if not isinstance(upstream_override, dict):
+        raise ConfigError("upstream_proxy must be an object")
+    merged = {**DEFAULT_SETTINGS, **config}
+    merged["upstream_proxy"] = {
+        **DEFAULT_SETTINGS["upstream_proxy"],
+        **upstream_override,
+    }
+    config = merged
 
     host = config.get("listen_host", "127.0.0.1")
     port = config.get("listen_port", 8888)
@@ -35,9 +63,7 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(port, int) or not 1 <= port <= 65535:
         raise ConfigError("listen_port must be an integer from 1 to 65535")
 
-    upstream = config.get("upstream_proxy", {})
-    if not isinstance(upstream, dict):
-        raise ConfigError("upstream_proxy must be an object")
+    upstream = config["upstream_proxy"]
     if upstream.get("enabled", False):
         upstream_host = upstream.get("host")
         upstream_port = upstream.get("port")
@@ -143,13 +169,14 @@ def main() -> int:
     upstream = config.get("upstream_proxy", {})
     if upstream.get("enabled", False):
         if not can_connect(upstream["host"], upstream["port"]):
-            print_error(
-                "Cannot connect to upstream proxy:\n\n"
-                f"{upstream['host']}:{upstream['port']}\n\n"
-                "Please check your v2rayN proxy type and port."
+            print(
+                "\n[WARNING] Cannot connect to upstream proxy "
+                f"{upstream['host']}:{upstream['port']}; using direct connection."
             )
-            return 2
-        upstream_text = f"{upstream['type']}://{upstream['host']}:{upstream['port']}"
+            config["upstream_proxy"] = {**upstream, "enabled": False}
+            upstream_text = "Unavailable; using direct connection"
+        else:
+            upstream_text = f"{upstream['type']}://{upstream['host']}:{upstream['port']}"
     else:
         upstream_text = "Disabled (direct connection)"
 
@@ -164,6 +191,7 @@ def main() -> int:
 
     env = os.environ.copy()
     env["WVS_CONFIG"] = str(config_path)
+    env["WVS_CONFIG_INLINE"] = json.dumps(config, ensure_ascii=False)
     env["WVS_DEBUG"] = "1" if args.debug else "0"
 
     try:

@@ -8,6 +8,7 @@ import ssl
 import subprocess
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
@@ -88,14 +89,25 @@ def format_course_title(title: str) -> str:
     remainder = stripped[match.end():].strip()
     return f"{number:02d}. {remainder}" if remainder else f"{number:02d}"
 
+def timestamped_stem(stem: str) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{stem}_{timestamp}"
+
+
+def timestamped_filename(stem: str, suffix: str) -> str:
+    return f"{timestamped_stem(stem)}{suffix}"
+
+
 def safe_filename(url: str, title: str | None = None) -> str:
     source = Path(urlsplit(url).path)
     suffix = source.suffix.lower() or ".mp4"
     if title:
-        return safe_name(format_course_title(title)) + suffix
-    name = unquote(source.name) or f"video{suffix}"
-    stem = safe_name(Path(name).stem)
-    return f"{stem}{Path(name).suffix.lower() or suffix}"
+        stem = safe_name(format_course_title(title))
+    else:
+        name = unquote(source.name) or f"video{suffix}"
+        stem = safe_name(Path(name).stem)
+        suffix = Path(name).suffix.lower() or suffix
+    return timestamped_filename(stem, suffix)
 
 
 def media_key(value: str) -> str:
@@ -297,7 +309,7 @@ class VideoDownloader:
                 self.hls_tasks.task_done()
 
     def _reserve_hls_target(self, title: str) -> tuple[Path, Path]:
-        base_name = safe_name(title)
+        base_name = timestamped_stem(safe_name(title))
         for index in range(1, 1000):
             suffix = "" if index == 1 else f" ({index})"
             target = self.output_dir / f"{base_name}{suffix}.mp4"

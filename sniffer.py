@@ -54,7 +54,8 @@ class VideoSniffer:
         self.lock = threading.Lock()
         self.debug = os.environ.get("WVS_DEBUG") == "1"
         config_path = Path(os.environ.get("WVS_CONFIG", BASE_DIR / "config.json"))
-        self.config = self._load_config(config_path)
+        inline_config = os.environ.get("WVS_CONFIG_INLINE")
+        self.config = json.loads(inline_config) if inline_config else self._load_config(config_path)
         configured_log = Path(self.config.get("log_file", "logs/videos.log"))
         self.log_path = configured_log if configured_log.is_absolute() else BASE_DIR / configured_log
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

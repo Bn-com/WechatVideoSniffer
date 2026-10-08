@@ -1,14 +1,14 @@
 # WechatVideoSniffer
 
-Windows 下基于 mitmproxy 的微信小程序视频请求 URL 捕获 MVP。它只观察并记录经过本地代理的 HTTP/HTTPS 请求，不下载视频、不绕过证书固定（certificate pinning）、DRM 或访问控制。
+Windows 下基于 mitmproxy 的微信小程序视频请求 URL 捕获工具。默认只观察并记录经过本地代理的 HTTP/HTTPS 请求；可在偏好设置中选择是否自动下载。程序不绕过证书固定（certificate pinning）、DRM 或访问控制。
 
 ## 网络链路
 
 ```text
-微信/测试浏览器 -> 127.0.0.1:8888 -> v2rayN HTTP/SOCKS5 代理 -> Internet
+微信/测试浏览器 -> 127.0.0.1:8888 ->（可选）v2rayN HTTP/SOCKS5 代理 -> Internet
 ```
 
-程序**不会修改 Windows 系统代理**，也不会关闭或改变 v2rayN。第一阶段请手动配置测试流量，测试结束后手动恢复原设置。
+GUI 点击 Start monitoring 时会临时把当前用户的 Windows HTTP 代理指向本地 `127.0.0.1:8888`，停止或关闭时恢复原设置；命令行模式不修改系统代理。程序不会关闭或改变 v2rayN。
 
 ## 1. 安装
 
@@ -21,11 +21,13 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-## 2. 配置 v2rayN 上游
+## 2. 网络与偏好设置
 
-在 v2rayN 中查看当前本地 HTTP 或 SOCKS5 监听端口，然后修改 `config.json`。`10808` 只是示例，不能假定它就是你的端口。
+`config.json` 是可选的。文件不存在时，程序会使用内置默认值：本地监听 `127.0.0.1:8888`、上游代理关闭（直接连接）、自动下载关闭。GUI 中可通过 **Settings → Preferences...** 配置这些选项；保存偏好时才会写入 `config.json`。
 
-HTTP 示例：
+如果电脑需要通过 v2rayN 上网，在 GUI 的偏好设置中勾选上游代理，并填写 v2rayN 当前的本地 HTTP 或 SOCKS5 监听端口。`10808` 只是示例，不能假定它就是你的端口。关闭上游代理时，程序会直接连接网络，不依赖 v2rayN。
+
+HTTP 配置示例：
 
 ```json
 "upstream_proxy": {
@@ -36,7 +38,7 @@ HTTP 示例：
 }
 ```
 
-SOCKS5 示例把 `type` 改为 `socks5`，并填写 v2rayN 实际 SOCKS 端口。启动时程序会检查该端口是否可连接；配置错误时会给出可读提示，而不是 traceback。
+SOCKS5 示例把 `type` 改为 `socks5`，并填写 v2rayN 实际 SOCKS 端口。启用上游代理时，程序会检查该端口；连接不到时会提示并回退到直接连接。未启用时始终直连。
 
 `ssl_insecure` 默认是 `false`。只有在你明确知道上游服务器证书有问题时才应启用；它与安装 mitmproxy CA 不是一回事。
 
@@ -56,7 +58,7 @@ http://mitm.it
 
 选择 Windows，下载并安装 mitmproxy CA 证书到当前用户的“受信任的根证书颁发机构”。只应在自己的测试电脑上安装。测试结束后如果不再使用，可从 Windows 证书管理器删除 mitmproxy 证书。
 
-安装证书后，通过这个代理访问普通 HTTPS 网站。如果网页正常打开，说明 `测试应用 -> WechatVideoSniffer -> v2rayN -> Internet` 链路可用。
+安装证书后，通过这个代理访问普通 HTTPS 网站。如果网页正常打开，说明本地捕获链路可用；启用了上游代理时，流量再经 v2rayN 出口，否则直接连接 Internet。
 
 > 安装 CA 使 mitmproxy 能解密经过它的 HTTPS 流量。请勿在不受信任的机器上安装，也不要分享 mitmproxy 私钥目录。
 
@@ -86,16 +88,13 @@ debug 模式会输出普通请求：
 
 ### 关于 Windows 系统代理和 v2rayN
 
-微信通常没有独立代理设置，是否读取 Windows 系统代理取决于微信版本和具体网络栈。若必须临时修改 Windows 系统代理：
+微信通常没有独立代理设置，是否读取 Windows 系统代理取决于微信版本和具体网络栈。GUI 开始监听时会把当前用户的系统代理临时指向 `127.0.0.1:8888`，并在停止或关闭时恢复。命令行模式则需要你手动给测试浏览器配置这个地址。
 
-1. 先截图或记下当前代理开关、地址、端口和 PAC 设置（通常由 v2rayN 管理）。
-2. 保持 v2rayN 运行；把系统 HTTP/HTTPS 代理临时改为 `127.0.0.1:8888`。
-3. 工具的 `upstream_proxy` 仍指向 v2rayN 的本地 HTTP/SOCKS5 端口，因此最终出口行为不变。
-4. 测试完立即恢复原系统代理设置；也可在 v2rayN 中重新启用其“设置系统代理”来恢复。
+如果偏好设置中启用了 v2rayN 上游，最终流量从 v2rayN 的本地端口出口；未启用时，WechatVideoSniffer 从本机直接连接 Internet。不要把上游端口设为 `8888`，否则会形成代理环路。
 
 不要同时让 v2rayN 把系统代理指向自身、又期望微信先经过 8888；系统代理只能有一个入口。也不要把 WechatVideoSniffer 的上游设为 8888，否则会形成代理环路。
 
-本程序不会自动修改或恢复系统代理，因此关闭程序、Ctrl+C 或异常退出都不会改变系统设置。手动改过系统代理时，恢复责任仍在用户；这是 MVP 有意采用的安全策略。
+GUI 会自动备份并恢复系统代理；命令行模式不修改系统代理。若程序异常退出，可再次启动 GUI 让它恢复遗留的代理备份。
 
 ## 5. 查看结果
 
@@ -132,14 +131,14 @@ possible certificate pinning / unsupported traffic
 
 ### 上游连接失败
 
-确认 v2rayN 正在运行、`type` 与端口匹配。HTTP 端口必须配 `http`，SOCKS 端口必须配 `socks5`。不要照抄示例端口。
+只有启用了上游代理时才需要检查 v2rayN：确认它正在运行，代理类型与端口匹配。HTTP 端口配 `http`，SOCKS 端口配 `socks5`。不用 v2rayN 时，在 Preferences 中关闭上游代理即可直连。
 
 ## 隐私与安全
 
 捕获日志可能包含带签名、账号标识或短期凭据的 URL。不要公开分享 `logs/videos.log`。本工具仅用于你有权测试的流量和资源。
 ## 自动下载（第二阶段试验功能）
 
-`config.json` 中：
+可在 **Settings → Preferences...** 中开启自动下载；也可以手动在 `config.json` 中设置：
 
 ```json
 "auto_download": true,

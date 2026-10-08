@@ -9,15 +9,44 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from urllib.parse import urlsplit
 
-from main import BASE_DIR, build_command, can_connect, find_mitmdump, load_config
+from main import (
+    BASE_DIR,
+    ConfigError,
+    build_command,
+    can_connect,
+    find_mitmdump,
+    load_config,
+)
 from windows_proxy import ProxySession, read_proxy_state
 
 BACKUP_PATH = BASE_DIR / "logs" / "proxy_backup.json"
+
+
+class RenameDialog(simpledialog.Dialog):
+    def __init__(self, parent: tk.Misc, initialvalue: str) -> None:
+        self.initialvalue = initialvalue
+        self.result: str | None = None
+        super().__init__(parent, title="Rename video")
+
+    def body(self, master: tk.Misc) -> tk.Entry:
+        ttk.Label(master, text="New file name:").grid(row=0, column=0, sticky="w")
+        self.entry = ttk.Entry(master, width=48)
+        self.entry.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.entry.insert(0, self.initialvalue)
+        extension_length = len(Path(self.initialvalue).suffix)
+        stem_length = max(0, len(self.initialvalue) - extension_length)
+        self.entry.selection_range(0, stem_length)
+        self.entry.icursor(stem_length)
+        return self.entry
+
+    def apply(self) -> None:
+        self.result = self.entry.get()
 
 
 class App:
@@ -52,6 +81,12 @@ class App:
         self.refresh_proxy_status()
 
     def build_ui(self) -> None:
+        menubar = tk.Menu(self.root)
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_command(label="Preferences...", command=self.open_settings)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        self.root.config(menu=menubar)
+
         box = ttk.Frame(self.root, padding=14)
         box.pack(fill="both", expand=True)
         box.columnconfigure(0, weight=1)
@@ -121,6 +156,135 @@ class App:
         self.log = scrolledtext.ScrolledText(box, state="disabled", font=("Consolas", 9), wrap="word")
         self.log.grid(row=7, column=0, sticky="nsew")
         box.rowconfigure(7, weight=1)
+
+    def open_settings(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Preferences")
+        window.transient(self.root)
+        window.resizable(False, False)
+        window.grab_set()
+
+        settings = ttk.Frame(window, padding=14)
+        settings.grid(sticky="nsew")
+        settings.columnconfigure(1, weight=1)
+        settings.columnconfigure(3, weight=1)
+
+        listen_host = tk.StringVar(value=str(self.config.get("listen_host", "127.0.0.1")))
+        listen_port = tk.StringVar(value=str(self.config.get("listen_port", 8888)))
+        upstream = self.config.get("upstream_proxy", {})
+        proxy_enabled = tk.BooleanVar(value=bool(upstream.get("enabled", False)))
+        proxy_type = tk.StringVar(value=str(upstream.get("type", "http")))
+        proxy_host = tk.StringVar(value=str(upstream.get("host", "127.0.0.1")))
+        proxy_port = tk.StringVar(value=str(upstream.get("port", 10808)))
+        ssl_insecure = tk.BooleanVar(value=bool(self.config.get("ssl_insecure", False)))
+        auto_download = tk.BooleanVar(value=bool(self.config.get("auto_download", False)))
+        auto_download_catalog = tk.BooleanVar(value=bool(self.config.get("auto_download_catalog", False)))
+        output_dir = tk.StringVar(value=self.output.get())
+        log_file = tk.StringVar(value=str(self.config.get("log_file", "logs/videos.log")))
+
+        listener = ttk.LabelFrame(settings, text="Local listener", padding=10)
+        listener.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 8))
+        ttk.Label(listener, text="Address").grid(row=0, column=0, sticky="w")
+        ttk.Entry(listener, textvariable=listen_host, width=22).grid(row=0, column=1, padx=(6, 14))
+        ttk.Label(listener, text="Port").grid(row=0, column=2, sticky="w")
+        ttk.Entry(listener, textvariable=listen_port, width=10).grid(row=0, column=3, padx=(6, 0))
+
+        proxy_frame = ttk.LabelFrame(settings, text="Optional upstream proxy", padding=10)
+        proxy_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=8)
+        proxy_frame.columnconfigure(1, weight=1)
+        proxy_frame.columnconfigure(3, weight=1)
+        ttk.Checkbutton(
+            proxy_frame,
+            text="Use an upstream proxy (leave unchecked for a direct connection)",
+            variable=proxy_enabled,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(proxy_frame, text="Type").grid(row=1, column=0, sticky="w")
+        type_box = ttk.Combobox(proxy_frame, textvariable=proxy_type, values=("http", "https", "socks5"), state="readonly", width=12)
+        type_box.grid(row=1, column=1, sticky="w", padx=(6, 14))
+        ttk.Label(proxy_frame, text="Host").grid(row=1, column=2, sticky="w")
+        host_entry = ttk.Entry(proxy_frame, textvariable=proxy_host, width=22)
+        host_entry.grid(row=1, column=3, sticky="ew", padx=(6, 0))
+        ttk.Label(proxy_frame, text="Port").grid(row=2, column=0, sticky="w", pady=(7, 0))
+        port_entry = ttk.Entry(proxy_frame, textvariable=proxy_port, width=12)
+        port_entry.grid(row=2, column=1, sticky="w", padx=(6, 14), pady=(7, 0))
+        proxy_fields = (type_box, host_entry, port_entry)
+
+        def update_proxy_fields(*_args) -> None:
+            state = "normal" if proxy_enabled.get() else "disabled"
+            for field in proxy_fields:
+                field.configure(state=state)
+
+        proxy_enabled.trace_add("write", update_proxy_fields)
+        update_proxy_fields()
+
+        behavior = ttk.LabelFrame(settings, text="Behavior", padding=10)
+        behavior.grid(row=2, column=0, columnspan=4, sticky="ew", pady=8)
+        ttk.Checkbutton(behavior, text="Automatically download detected videos", variable=auto_download).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(behavior, text="Automatically download videos found in catalog responses", variable=auto_download_catalog).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(behavior, text="Skip upstream HTTPS certificate verification (insecure)", variable=ssl_insecure).grid(row=2, column=0, sticky="w", pady=(4, 0))
+
+        paths = ttk.LabelFrame(settings, text="Files", padding=10)
+        paths.grid(row=3, column=0, columnspan=4, sticky="ew", pady=8)
+        paths.columnconfigure(1, weight=1)
+        ttk.Label(paths, text="Save videos to").grid(row=0, column=0, sticky="w")
+        ttk.Entry(paths, textvariable=output_dir, width=44).grid(row=0, column=1, sticky="ew", padx=6)
+
+        def browse_output() -> None:
+            selected = filedialog.askdirectory(parent=window, initialdir=output_dir.get())
+            if selected:
+                output_dir.set(selected)
+
+        ttk.Button(paths, text="Browse...", command=browse_output).grid(row=0, column=2)
+        ttk.Label(paths, text="Video URL log").grid(row=1, column=0, sticky="w", pady=(7, 0))
+        ttk.Entry(paths, textvariable=log_file, width=44).grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=(7, 0))
+
+        buttons = ttk.Frame(settings)
+        buttons.grid(row=4, column=0, columnspan=4, sticky="e", pady=(10, 0))
+
+        def save_preferences() -> None:
+            try:
+                host_value = listen_host.get().strip()
+                port_value = int(listen_port.get().strip())
+                proxy_host_value = proxy_host.get().strip()
+                proxy_port_value = int(proxy_port.get().strip())
+                proxy_type_value = proxy_type.get().strip() or "http"
+                if not host_value:
+                    raise ValueError("Local listener address cannot be empty.")
+                if not 1 <= port_value <= 65535:
+                    raise ValueError("Local listener port must be between 1 and 65535.")
+                if proxy_enabled.get() and not proxy_host_value:
+                    raise ValueError("Enter the upstream proxy host, or turn off upstream proxy.")
+                if proxy_enabled.get() and proxy_type_value not in {"http", "https", "socks5"}:
+                    raise ValueError("Choose HTTP, HTTPS, or SOCKS5 for the upstream proxy type.")
+                if not 1 <= proxy_port_value <= 65535:
+                    raise ValueError("Upstream proxy port must be between 1 and 65535.")
+
+                self.config.update({
+                    "listen_host": host_value,
+                    "listen_port": port_value,
+                    "upstream_proxy": {
+                        "enabled": proxy_enabled.get(),
+                        "type": proxy_type_value,
+                        "host": proxy_host_value,
+                        "port": proxy_port_value,
+                    },
+                    "ssl_insecure": ssl_insecure.get(),
+                    "auto_download": auto_download.get(),
+                    "auto_download_catalog": auto_download_catalog.get(),
+                    "log_file": log_file.get().strip() or "logs/videos.log",
+                })
+                self.output.set(output_dir.get().strip() or "output")
+                self.save_config()
+                self.config = load_config(self.config_path)
+            except (ConfigError, ValueError, OSError, RuntimeError) as exc:
+                messagebox.showerror("Preferences", str(exc), parent=window)
+                return
+            if self.process is not None and self.process.poll() is None:
+                messagebox.showinfo("Preferences", "Saved. Restart monitoring for these changes to take effect.", parent=window)
+            window.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=window.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(buttons, text="Save", command=save_preferences).pack(side="right")
 
     @staticmethod
     def _download_name(value: str) -> str:
@@ -304,7 +468,7 @@ class App:
                 messagebox.showerror("Rename failed", "The recorded file no longer exists. Download it again first.")
                 return
             initial_name = old_path.name
-        new_name = simpledialog.askstring("Rename video", "New file name:", initialvalue=initial_name, parent=self.root)
+        new_name = RenameDialog(self.root, initial_name).result
         if not new_name:
             return
         new_name = re.sub(r"[\\/:*?\"<>|]", "_", new_name).strip(" .")
@@ -462,12 +626,15 @@ class App:
                 self.log_line("[GUI] v2rayN unavailable; using direct mode")
             elif upstream.get("enabled"):
                 self.log_line("[GUI] Using v2rayN upstream")
+            else:
+                self.log_line("[GUI] Using direct connection (no upstream proxy)")
             host = self.config.get("listen_host", "127.0.0.1")
             port = int(self.config.get("listen_port", 8888))
             if self.listening(host, port):
                 raise RuntimeError(f"Port already in use: {host}:{port}")
             env = os.environ.copy()
             env["WVS_CONFIG"] = str(self.config_path)
+            env["WVS_CONFIG_INLINE"] = json.dumps(runtime_config, ensure_ascii=False)
             env["WVS_DEBUG"] = "1"
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             self.process = subprocess.Popen(build_command(runtime_config, True, executable), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1, env=env, creationflags=flags)
@@ -550,9 +717,18 @@ class App:
 
 def main() -> None:
     root = tk.Tk()
+    # Use a Windows font with full CJK glyph coverage in dialogs and entries.
+    for font_name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
+        try:
+            tkfont.nametofont(font_name, root=root).configure(family="Microsoft YaHei UI", weight="normal")
+        except tk.TclError:
+            pass
     App(root)
     root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+
+
+

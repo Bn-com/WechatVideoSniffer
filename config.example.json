@@ -1,16 +1,15 @@
 {
-    "listen_host":  "127.0.0.1",
-    "listen_port":  8888,
-    "upstream_proxy":  {
-                           "enabled":  true,
-                           "host":  "127.0.0.1",
-                           "port":  10808,
-                           "type":  "http"
-                       },
-    "log_file":  "logs/videos.log",
-    "ssl_insecure":  false,
-    "auto_download":  true,
-    "output_dir":  "output",
-    "auto_download_catalog":  true,
-    "download_quality":  2
+    "listen_host": "127.0.0.1",
+    "listen_port": 8888,
+    "upstream_proxy": {
+        "enabled": false,
+        "host": "127.0.0.1",
+        "port": 10808,
+        "type": "http"
+    },
+    "log_file": "logs/videos.log",
+    "ssl_insecure": false,
+    "auto_download": false,
+    "output_dir": "output",
+    "auto_download_catalog": false
 }
