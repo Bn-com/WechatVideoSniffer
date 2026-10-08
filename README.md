@@ -44,23 +44,26 @@ SOCKS5 示例把 `type` 改为 `socks5`，并填写 v2rayN 实际 SOCKS 端口�
 
 ## 3. 首次启动与 CA 证书
 
-启动：
+mitmproxy 需要一个本机 CA 证书，才能解密经它转发的 HTTPS 流量。WechatVideoSniffer 的 Python 环境包含 mitmproxy；首次启动监控时会生成证书文件，不需要另行安装独立的 mitmproxy 软件。证书通常位于当前 Windows 用户目录下的 `%USERPROFILE%\.mitmproxy`。
 
-```powershell
-python main.py
-```
+在自己的测试电脑上按以下步骤安装：
 
-保持程序运行，将一个测试浏览器的 HTTP 和 HTTPS 代理临时设为 `127.0.0.1:8888`，然后在该浏览器访问：
+1. 启动 GUI 并点击 **Start monitoring** 一次，让程序生成证书；随后可以先点 **Stop monitoring**。
+2. 在资源管理器地址栏输入 `%USERPROFILE%\.mitmproxy`，找到 `mitmproxy-ca-cert.cer` 并双击。
+3. 在证书向导中选择 **Current User（当前用户）**，再选择 **Place all certificates in the following store（将所有证书放入下列存储）**，指定 **Trusted Root Certification Authorities（受信任的根证书颁发机构）**，完成导入。
+4. 按 **Win + R**，输入 `certmgr.msc`。确认在 **Current User → Trusted Root Certification Authorities → Certificates** 中能找到 `mitmproxy`。
+5. 关闭并重新打开浏览器或微信，再启动监控测试 HTTPS。
 
-```text
-http://mitm.it
-```
+**不要导入 `.p12` 文件。** `http://mitm.it` 的 Windows 下载按钮提供的是 `.p12`，其中包含私钥，Windows 导入时会要求私钥密码；这不是这里要安装的文件。请使用本机目录中的 `mitmproxy-ca-cert.cer`，不要选择 `.pem` 或 `.p12`。`http://mitm.it` 只有在浏览器流量经过正在运行的代理时才能访问。
 
-选择 Windows，下载并安装 mitmproxy CA 证书到当前用户的“受信任的根证书颁发机构”。只应在自己的测试电脑上安装。测试结束后如果不再使用，可从 Windows 证书管理器删除 mitmproxy 证书。
+常见情况：
 
-安装证书后，通过这个代理访问普通 HTTPS 网站。如果网页正常打开，说明本地捕获链路可用；启用了上游代理时，流量再经 v2rayN 出口，否则直接连接 Internet。
+- 浏览器显示 `NET::ERR_CERT_AUTHORITY_INVALID`：证书还没安装、放错了证书存储，或浏览器/微信尚未重启。回到上面的证书管理器路径确认 `mitmproxy` 是否存在。
+- 输入 `http://` 地址后仍出现证书错误：网站可能自动跳转到了 `https://`；HTTP 本身没有证书，错误来自跳转后的 HTTPS 连接。
+- `%USERPROFILE%\.mitmproxy` 里没有 `.cer`：确认用同一个 Windows 账户启动程序，并先启动一次监控。不要用另一个账户或“以其他用户身份运行”来生成和安装证书。
+- 证书已安装、普通浏览器 HTTPS 正常，但小程序无法播放或无法捕获：应用可能使用独立证书校验、证书固定或其他不兼容网络机制；安装 CA 不会绕过这些限制。
 
-> 安装 CA 使 mitmproxy 能解密经过它的 HTTPS 流量。请勿在不受信任的机器上安装，也不要分享 mitmproxy 私钥目录。
+安装根证书意味着 Windows 会信任该 CA 签发的证书，因此只在自己的测试电脑上安装。测试结束后若不再使用，可在上述证书管理器中删除 `mitmproxy`。不要分享 `.mitmproxy` 目录中的私钥文件。
 
 ## 4. 让流量经过本工具
 
@@ -120,7 +123,7 @@ m3u8 会正常显示并写入 `logs/videos.log`；大量 `.ts` 和 `.m4s` 分片
 
 ### HTTPS 失败
 
-先确认已通过 `http://mitm.it` 安装 mitmproxy CA，并重启测试应用。如果浏览器 HTTPS 正常而特定小程序失败，可能是 certificate pinning、不受支持的流量、QUIC/HTTP3、DRM 或其他访问控制：
+先按“首次启动与 CA 证书”一节确认 `mitmproxy-ca-cert.cer` 已导入当前用户的“受信任的根证书颁发机构”，并重启测试应用。如果浏览器 HTTPS 正常而特定小程序失败，可能是 certificate pinning、不受支持的流量、QUIC/HTTP3、DRM 或其他访问控制：
 
 ```text
 HTTPS interception failed
