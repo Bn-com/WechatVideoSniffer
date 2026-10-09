@@ -73,9 +73,13 @@ class App:
         self.download_names: dict[str, str] = {}
         self.download_paths: dict[str, str] = {}
         self.download_urls: dict[str, str] = {}
+        self.download_kinds: dict[str, str] = {}
+        self.download_headers: dict[str, dict[str, str]] = {}
+        self.download_state_path = BASE_DIR / "logs" / "download_list.json"
         self.pending_renames: dict[str, str] = {}
         self.redownload_rows: dict[str, str] = {}
         self.build_ui()
+        self.load_download_list()
         self.recover_stale_proxy()
         self.root.after(100, self.poll)
         self.refresh_proxy_status()
@@ -127,7 +131,7 @@ class App:
         list_header.columnconfigure(0, weight=1)
         ttk.Label(list_header, text="Download list").grid(row=0, column=0, sticky="w")
         ttk.Button(list_header, text="Rename selected", command=self.rename_selected).grid(row=0, column=1, sticky="e", padx=(0, 6))
-        ttk.Button(list_header, text="Download again", command=self.download_again).grid(row=0, column=2, sticky="e", padx=(0, 6))
+        ttk.Button(list_header, text="Continue / retry", command=self.download_again).grid(row=0, column=2, sticky="e", padx=(0, 6))
         ttk.Button(list_header, text="Open path", command=self.open_selected_path).grid(row=0, column=3, sticky="e", padx=(0, 6))
         ttk.Button(list_header, text="Clear list", command=self.clear_download_list).grid(row=0, column=4, sticky="e")
         list_frame = ttk.Frame(box)
@@ -149,7 +153,7 @@ class App:
         self.download_menu = tk.Menu(self.root, tearoff=False)
         self.download_menu.add_command(label="Open file path", command=self.open_selected_path)
         self.download_menu.add_command(label="Rename", command=self.rename_selected)
-        self.download_menu.add_command(label="Download again", command=self.download_again)
+        self.download_menu.add_command(label="Continue / retry", command=self.download_again)
         self.download_list.bind("<Button-3>", self.show_download_menu)
 
         ttk.Label(box, text="Live log").grid(row=6, column=0, sticky="w", pady=(8, 3))
@@ -320,43 +324,143 @@ class App:
             self.log_line(f"[GUI] Deferred rename failed: {exc}")
             return (new_name, path_text, "Completed (rename failed)")
 
+    def save_download_list(self) -> None:
+        records = []
+        for key, item in self.download_items.items():
+            values = tuple(self.download_list.item(item, "values"))
+            if len(values) < 3:
+                continue
+            records.append({
+                "key": key,
+                "name": str(values[0]),
+                "path": self.download_paths.get(key, str(values[1])),
+                "status": str(values[2]),
+                "url": self.download_urls.get(key, ""),
+                "kind": self.download_kinds.get(key, "download"),
+                "headers": self.download_headers.get(key, {}),
+            })
+        self.download_state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.download_state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(self.download_state_path)
+
+    def load_download_list(self) -> None:
+        records = None
+        if self.download_state_path.exists():
+            try:
+                records = json.loads(self.download_state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                records = []
+        else:
+            # Migrate the old completed-download history into the visible list.
+            history_path = BASE_DIR / "logs" / "downloaded.json"
+            try:
+                history = json.loads(history_path.read_text(encoding="utf-8"))
+                records = [
+                    {"key": key, "path": path, "name": Path(path).name, "status": "Completed", "url": ""}
+                    for key, path in history.get("completed_files", {}).items()
+                ]
+            except (OSError, json.JSONDecodeError, AttributeError):
+                records = []
+        if not isinstance(records, list):
+            records = []
+        restored = 0
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            key = str(record.get("key", ""))
+            path = str(record.get("path", ""))
+            name = str(record.get("name") or (Path(path).name if path else key))
+            status = str(record.get("status", "Interrupted"))
+            url = str(record.get("url", ""))
+            kind = str(record.get("kind", "hls" if urlsplit(url).path.lower().endswith(".m3u8") else "download"))
+            headers = record.get("headers", {})
+            if not isinstance(headers, dict):
+                headers = {}
+            if not key:
+                continue
+            if status.lower().startswith(("queued", "downloading")):
+                has_partial = bool(path) and Path(path + ".part").is_file()
+                if kind == "hls" and has_partial:
+                    status = "Interrupted (HLS will restart)"
+                else:
+                    status = "Interrupted (partial saved)" if has_partial else "Interrupted"
+            elif status == "Completed" and path and not Path(path).is_file():
+                status = "File missing"
+            item = self.download_list.insert("", "end", values=(name, path, status))
+            self.download_items[key] = item
+            self.download_names[key] = name
+            self.download_paths[key] = path
+            self.download_urls[key] = url
+            self.download_kinds[key] = kind
+            self.download_headers[key] = {str(k): str(v) for k, v in headers.items()}
+            restored += 1
+        self.save_download_list()
+        if restored:
+            self.download_status.set(f"Restored {restored} download records")
+
+    def mark_downloads_interrupted(self) -> None:
+        for key, item in self.download_items.items():
+            values = tuple(self.download_list.item(item, "values"))
+            if len(values) < 3 or not str(values[2]).lower().startswith(("queued", "downloading")):
+                continue
+            path = self.download_paths.get(key, "")
+            has_partial = bool(path) and Path(path + ".part").is_file()
+            kind = self.download_kinds.get(key, "download")
+            if kind == "hls" and has_partial:
+                status = "Interrupted (HLS will restart)"
+            else:
+                status = "Interrupted (partial saved)" if has_partial else "Interrupted"
+            self.download_list.item(item, values=(values[0], values[1], status))
+        self.save_download_list()
+
     def update_download_list(self, value: str) -> None:
         text = value.strip()
         if not text:
             return
-        if "[HLS TASK] " in text:
+        if "[HLS TASK] " in text or "[DOWNLOAD TASK] " in text:
+            prefix = "[HLS TASK] " if "[HLS TASK] " in text else "[DOWNLOAD TASK] "
             try:
-                event = json.loads(text.split("[HLS TASK] ", 1)[1])
+                event = json.loads(text.split(prefix, 1)[1])
                 key = str(event.get("key", ""))
                 path = str(event.get("path", ""))
                 status = str(event.get("status", ""))
                 url = str(event.get("url", ""))
-                reuse_key = self.redownload_rows.get(key)
-                if reuse_key:
+                kind = str(event.get("kind", "hls" if prefix.startswith("[HLS") else "download"))
+                headers = event.get("headers", {})
+                if not isinstance(headers, dict):
+                    headers = {}
+                if not key:
+                    return
+                reuse_key = self.redownload_rows.pop(key, None)
+                if reuse_key and reuse_key != key:
                     old_item = self.download_items.pop(reuse_key, None)
                     if old_item:
                         self.download_items[key] = old_item
                     self.download_names[key] = self.download_names.pop(reuse_key, Path(path).name if path else "Unknown video")
-                    self.download_paths[key] = path
-                    self.download_urls[key] = url
-                    self.redownload_rows.pop(key, None)
+                    self.download_paths.pop(reuse_key, None)
+                    self.download_urls.pop(reuse_key, None)
+                    self.download_kinds.pop(reuse_key, None)
+                    self.download_headers.pop(reuse_key, None)
                 name = self.download_names.get(key, Path(path).name if path else "Unknown video")
                 item = self.download_items.get(key)
-                values = (name, path, status)
                 if item is None:
-                    item = self.download_list.insert("", "end", values=values)
+                    item = self.download_list.insert("", "end", values=(name, path, status))
                     self.download_items[key] = item
                 else:
-                    self.download_list.item(item, values=values, tags=())
+                    self.download_list.item(item, values=(name, path, status), tags=())
                 self.download_names[key] = name
                 self.download_paths[key] = path
                 self.download_urls[key] = url
+                self.download_kinds[key] = kind
+                self.download_headers[key] = {str(k): str(v) for k, v in headers.items()}
                 if status == "Completed":
                     current = tuple(self.download_list.item(item, "values"))
                     updated = self._apply_pending_rename(key, item, current)
                     self.download_list.item(item, values=updated, tags=())
                 self.download_list.see(item)
-            except (json.JSONDecodeError, AttributeError, TypeError):
+                self.save_download_list()
+            except (json.JSONDecodeError, AttributeError, TypeError, OSError):
                 pass
             return
         if "[HLS HISTORY] " in text:
@@ -377,45 +481,15 @@ class App:
                 self.download_names[key] = name
                 self.download_paths[key] = path
                 self.download_urls[key] = str(event.get("url", ""))
+                self.download_kinds[key] = "hls"
+                self.download_headers.setdefault(key, {})
                 self.download_list.see(item)
-            except (json.JSONDecodeError, AttributeError, TypeError):
+                self.save_download_list()
+            except (json.JSONDecodeError, AttributeError, TypeError, OSError):
                 pass
             return
-        markers = (
-            ("[HLS DOWNLOAD QUEUED] ", "Queued"),
-            ("[HLS DOWNLOAD START] ", "Downloading"),
-            ("[HLS DOWNLOAD COMPLETE] ", "Completed"),
-            ("[HLS DOWNLOAD FAILED] ", "Failed"),
-            ("[DOWNLOAD QUEUED] ", "Queued"),
-            ("[DOWNLOAD START] ", "Downloading"),
-            ("[DOWNLOAD COMPLETE] ", "Completed"),
-            ("[DOWNLOAD FAILED] ", "Failed"),
-        )
-        for marker, status in markers:
-            if marker not in text:
-                continue
-            raw_name = text.split(marker, 1)[1].strip().split("\n", 1)[0].strip().strip('"')
-            raw_path = Path(raw_name)
-            canonical = self._download_name(raw_name)
-            item = self.download_items.get(canonical)
-            display = self.download_names.get(canonical, canonical)
-            path = self.download_paths.get(canonical, str(raw_path.resolve()) if raw_path.is_absolute() else "")
-            if raw_path.is_absolute():
-                display = raw_path.name.removesuffix(".part")
-                self.download_names[canonical] = display
-                self.download_paths[canonical] = path
-            if item is None:
-                item = self.download_list.insert("", "end", values=(display, path, status))
-                self.download_items[canonical] = item
-                self.download_names[canonical] = display
-            else:
-                self.download_list.item(item, values=(display, path, status), tags=())
-            if status == "Completed":
-                current = tuple(self.download_list.item(item, "values"))
-                updated = self._apply_pending_rename(canonical, item, current)
-                self.download_list.item(item, values=updated, tags=())
-            self.download_list.see(item)
-            break
+        # Older status-only lines lack a stable task key; structured task events
+        # above carry the URL and target needed to restore a task after restart.
 
     def clear_download_list(self) -> None:
         for item in self.download_list.get_children():
@@ -424,8 +498,11 @@ class App:
         self.download_names.clear()
         self.download_paths.clear()
         self.download_urls.clear()
+        self.download_kinds.clear()
+        self.download_headers.clear()
         self.pending_renames.clear()
         self.redownload_rows.clear()
+        self.save_download_list()
         self.download_status.set("Download list cleared")
 
     def show_download_menu(self, event: tk.Event) -> None:
@@ -479,6 +556,7 @@ class App:
             self.download_names[key] = new_name
             self.download_list.item(item, values=(new_name, path_text, "Downloading (rename pending)"))
             self.log_line(f"[GUI] Rename scheduled after download: {new_name}")
+            self.save_download_list()
             return
         new_path = old_path.with_name(new_name)
         try:
@@ -494,6 +572,7 @@ class App:
         self.download_paths[key] = str(new_path.resolve())
         status = str(values[2]) if len(values) > 2 else "Completed"
         self.download_list.item(item, values=(new_path.name, str(new_path.resolve()), status), tags=())
+        self.save_download_list()
 
     def open_selected_path(self) -> None:
         selected = self._selected_key()
@@ -523,21 +602,36 @@ class App:
     def download_again(self) -> None:
         selected = self._selected_key()
         if selected is None:
-            messagebox.showinfo("Download again", "Select a missing download first.")
+            messagebox.showinfo("Continue download", "Select an interrupted, failed, or missing download first.")
             return
         key, item = selected
+        values = tuple(self.download_list.item(item, "values"))
+        status = str(values[2]) if len(values) > 2 else ""
+        path = self.download_paths.get(key, str(values[1]) if len(values) > 1 else "")
+        if status == "Completed" and path and Path(path).is_file():
+            messagebox.showinfo("Continue download", "This file is already complete.")
+            return
         url = self.download_urls.get(key, "")
         if not url:
-            messagebox.showerror("Download again", "Play the video once to obtain a current URL, then retry.")
+            messagebox.showerror("Continue download", "Play the video again to obtain a current URL, then retry.")
+            return
+        if not self.start():
             return
         request_path = BASE_DIR / "logs" / "redownload.jsonl"
-        # Keep this row even if the refreshed URL is assigned a new media key.
+        kind = self.download_kinds.get(key, "hls" if urlsplit(url).path.lower().endswith(".m3u8") else "download")
+        request = {
+            "url": url,
+            "key": key,
+            "path": path,
+            "kind": kind,
+            "headers": self.download_headers.get(key, {}),
+        }
         self.redownload_rows[key] = key
         with request_path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps({"url": url, "key": key}, ensure_ascii=False) + "\n")
-        values = self.download_list.item(item, "values")
-        self.download_list.item(item, values=(values[0], values[1], "Queued again"), tags=())
-        self.log_line(f"[GUI] Redownload requested: {url}")
+            file.write(json.dumps(request, ensure_ascii=False) + "\n")
+        self.download_list.item(item, values=(values[0], path, "Queued"), tags=())
+        self.save_download_list()
+        self.log_line(f"[GUI] Continue requested for: {values[0]}")
 
     def log_line(self, value: str) -> None:
         self.update_download_list(value)
@@ -545,7 +639,15 @@ class App:
         self.log.insert("end", value.rstrip() + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
-        if "[DOWNLOAD" in value or "[HLS" in value:
+        if "[DOWNLOAD TASK] " in value or "[HLS TASK] " in value:
+            try:
+                marker, payload = value.split("] ", 1)
+                event = json.loads(payload)
+                path = Path(str(event.get("path", "")))
+                self.download_status.set(f"{event.get('status', 'Download')}: {path.name}")
+            except (ValueError, json.JSONDecodeError, TypeError):
+                self.download_status.set(value.strip())
+        elif "[DOWNLOAD" in value or "[HLS" in value:
             self.download_status.set(value.strip())
 
     def poll(self) -> None:
@@ -561,6 +663,7 @@ class App:
                 self.proxy.restore()
             except Exception as exc:
                 self.log_line(f"[GUI] Proxy restore failed: {exc}")
+            self.mark_downloads_interrupted()
             self.status.set(f"Process exited ({code}); proxy restored")
             self.set_running(False)
             self.refresh_proxy_status()
@@ -687,6 +790,12 @@ class App:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process = None
+        try:
+            while True:
+                self.log_line(self.messages.get_nowait())
+        except queue.Empty:
+            pass
+        self.mark_downloads_interrupted()
         self.status.set("Stopped; proxy restored")
         self.set_running(False)
         self.refresh_proxy_status()

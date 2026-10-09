@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+from urllib.error import HTTPError
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 import imageio_ffmpeg
@@ -144,6 +145,7 @@ class VideoDownloader:
         self.ssl_insecure = bool(config.get("ssl_insecure", False))
         self.bulk_download = bool(config.get("auto_download_catalog", False))
         upstream = config.get("upstream_proxy", {})
+        self.upstream_proxy_enabled = bool(upstream.get("enabled", False))
         self.upstream_proxy_host = upstream.get("host", "127.0.0.1")
         self.upstream_proxy_port = upstream.get("port", 10808)
         self.tasks: queue.Queue[DownloadTask] = queue.Queue()
@@ -152,12 +154,19 @@ class VideoDownloader:
         self.hls_queued: set[str] = set()
         self.titles: dict[str, str] = {}
         self.lock = threading.Lock()
+        self.worker_start_lock = threading.Lock()
         self.opener = self._make_opener(config)
         self.worker = threading.Thread(target=self._run, name="video-downloader", daemon=True)
         self.hls_worker = threading.Thread(target=self._run_hls, name="hls-downloader", daemon=True)
         if self.enabled:
-            self.worker.start()
-            self.hls_worker.start()
+            self._ensure_workers()
+
+    def _ensure_workers(self) -> None:
+        with self.worker_start_lock:
+            if not self.worker.is_alive():
+                self.worker.start()
+            if not self.hls_worker.is_alive():
+                self.hls_worker.start()
 
     def _load_history(self) -> tuple[set[str], dict[str, str]]:
         try:
@@ -186,6 +195,29 @@ class VideoDownloader:
                 encoding="utf-8",
             )
             temp.replace(self.history_path)
+    @staticmethod
+    def _task_key(url: str, kind: str) -> str:
+        return urlsplit(url).path if kind == "hls" else media_key(url)
+
+    def _emit_task(self, task: DownloadTask, kind: str, status: str) -> None:
+        target = task.target
+        if target is None:
+            target = self.output_dir / safe_filename(task.url, task.title)
+        resumable_headers = {
+            name: value
+            for name, value in task.headers.items()
+            if name.lower() in {"user-agent", "referer", "origin", "accept"}
+        }
+        event = {
+            "key": self._task_key(task.url, kind),
+            "kind": kind,
+            "url": task.url,
+            "path": str(target.resolve()),
+            "status": status,
+            "headers": resumable_headers,
+        }
+        print(f"[{kind.upper()} TASK] {json.dumps(event, ensure_ascii=False)}", flush=True)
+
     def _make_opener(self, config: dict):
         handlers = []
         upstream = config.get("upstream_proxy", {})
@@ -248,19 +280,35 @@ class VideoDownloader:
             print(f"[RENAMED] {source.name} -> {target.name}", flush=True)
             return
 
-    def submit(self, url: str, headers: dict[str, str] | None = None, title: str | None = None) -> None:
-        if not self.enabled or not is_downloadable_video_url(url):
+    def submit(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        title: str | None = None,
+        force: bool = False,
+        target_path: str | Path | None = None,
+    ) -> None:
+        if (not self.enabled and not force) or not is_downloadable_video_url(url):
             return
         key = media_key(url)
         resolved_title = title or self.titles.get(key)
-        if key in self.completed_keys:
+        if key in self.completed_keys and not force:
             print(f"[DOWNLOAD SKIPPED] Previously completed: {resolved_title or key}", flush=True)
             return
+        target = Path(target_path) if target_path else self.output_dir / safe_filename(url, resolved_title)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if force:
+            with self.lock:
+                self.completed_keys.discard(key)
+                self.queued.discard(url)
+        self._ensure_workers()
         with self.lock:
             if url in self.queued:
                 return
             self.queued.add(url)
-        self.tasks.put(DownloadTask(url, headers or {}, resolved_title))
+        task = DownloadTask(url, headers or {}, resolved_title, target)
+        self.tasks.put(task)
+        self._emit_task(task, "download", "Queued")
         print(f"[DOWNLOAD QUEUED] {url}", flush=True)
 
     def submit_hls(
@@ -269,8 +317,9 @@ class VideoDownloader:
         headers: dict[str, str] | None = None,
         title: str | None = None,
         force: bool = False,
+        target_path: str | Path | None = None,
     ) -> None:
-        if not self.enabled:
+        if not self.enabled and not force:
             return
         key = urlsplit(url).path
         if force:
@@ -290,12 +339,17 @@ class VideoDownloader:
             }
             print(f"[HLS HISTORY] {json.dumps(event, ensure_ascii=False)}", flush=True)
             return
+        self._ensure_workers()
         with self.lock:
             if key in self.hls_queued:
                 return
-            target, lock_path = self._reserve_hls_target(title or f"Replay {len(self.completed_keys) + 1:02d}")
+            target, lock_path = self._reserve_hls_target(
+                title or f"Replay {len(self.completed_keys) + 1:02d}", target_path
+            )
             self.hls_queued.add(key)
-        self.hls_tasks.put(DownloadTask(url, headers or {}, title, target, lock_path))
+        task = DownloadTask(url, headers or {}, title, target, lock_path)
+        self.hls_tasks.put(task)
+        self._emit_task(task, "hls", "Queued")
         print(f"[HLS DOWNLOAD QUEUED] {target}", flush=True)
 
     def _run_hls(self) -> None:
@@ -304,11 +358,39 @@ class VideoDownloader:
             try:
                 self._download_hls(task)
             except Exception as exc:
+                self._emit_task(task, "hls", "Failed")
                 print(f"[HLS DOWNLOAD FAILED] {task.url}\n{exc}", flush=True)
             finally:
+                with self.lock:
+                    self.hls_queued.discard(urlsplit(task.url).path)
                 self.hls_tasks.task_done()
 
-    def _reserve_hls_target(self, title: str) -> tuple[Path, Path]:
+    def _reserve_hls_target(
+        self, title: str, target_path: str | Path | None = None
+    ) -> tuple[Path, Path]:
+        if target_path:
+            target = Path(target_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = target.with_name(target.name + ".lock")
+            if lock_path.exists():
+                try:
+                    owner_pid = int(lock_path.read_text(encoding="ascii").strip())
+                    os.kill(owner_pid, 0)
+                except ProcessLookupError:
+                    lock_path.unlink(missing_ok=True)
+                except PermissionError:
+                    raise
+                except ValueError:
+                    lock_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) in {87, 1168}:
+                        lock_path.unlink(missing_ok=True)
+                    else:
+                        raise
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.close(fd)
+            return target, lock_path
         base_name = timestamped_stem(safe_name(title))
         for index in range(1, 1000):
             suffix = "" if index == 1 else f" ({index})"
@@ -334,13 +416,24 @@ class VideoDownloader:
         if target is None or lock_path is None:
             target, lock_path = self._reserve_hls_target(task.title or f"Replay {len(self.completed_keys) + 1:02d}")
         partial = target.with_name(target.name + ".part")
+        proxy_args = (
+            ["-http_proxy", f"http://{self.upstream_proxy_host}:{self.upstream_proxy_port}"]
+            if self.upstream_proxy_enabled
+            else []
+        )
+        resumable_headers = {
+            key: value
+            for key, value in task.headers.items()
+            if key.lower() in {"user-agent", "referer", "origin", "accept"}
+        }
+        header_args = ["-headers", "".join(f"{key}: {value}\r\n" for key, value in resumable_headers.items())] if resumable_headers else []
         command = [
             imageio_ffmpeg.get_ffmpeg_exe(),
             "-y",
             "-loglevel",
             "warning",
-            "-http_proxy",
-            f"http://{self.upstream_proxy_host}:{self.upstream_proxy_port}",
+            *proxy_args,
+            *header_args,
             "-i",
             task.url,
             "-c",
@@ -353,6 +446,7 @@ class VideoDownloader:
             "mp4",
             str(partial),
         ]
+        self._emit_task(task, "hls", "Downloading")
         print(f"[HLS DOWNLOAD START] {target.name}", flush=True)
         try:
             completed = subprocess.run(command, capture_output=True, text=True)
@@ -364,6 +458,7 @@ class VideoDownloader:
                 raise RuntimeError("FFmpeg finished without producing output")
             partial.replace(target)
             self.mark_completed(key, str(target.resolve()))
+            self._emit_task(task, "hls", "Completed")
             print(f"[HLS DOWNLOAD COMPLETE] {target}", flush=True)
         finally:
             lock_path.unlink(missing_ok=True)
@@ -374,26 +469,54 @@ class VideoDownloader:
             try:
                 self._download(task)
             except Exception as exc:
+                self._emit_task(task, "download", "Failed")
                 print(f"[DOWNLOAD FAILED] {task.url}\n{exc}", flush=True)
             finally:
+                with self.lock:
+                    self.queued.discard(task.url)
                 self.tasks.task_done()
 
     def _download(self, task: DownloadTask) -> None:
-        target = self.output_dir / safe_filename(task.url, task.title)
+        target = task.target or self.output_dir / safe_filename(task.url, task.title)
         partial = target.with_name(target.name + ".part")
         if target.exists() and target.stat().st_size > 0:
             self.mark_completed(media_key(task.url), str(target.resolve()))
+            self._emit_task(task, "download", "Completed")
             print(f"[DOWNLOAD SKIPPED] Already exists: {target}", flush=True)
             return
 
         allowed_headers = {"user-agent", "referer", "origin", "cookie", "authorization", "accept"}
         headers = {key: value for key, value in task.headers.items() if key.lower() in allowed_headers}
+        offset = partial.stat().st_size if partial.exists() else 0
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
         request = Request(task.url, headers=headers)
+        self._emit_task(task, "download", "Downloading")
         print(f"[DOWNLOAD START] {target.name}", flush=True)
-        with self.opener.open(request, timeout=60) as response, partial.open("wb") as output:
-            total = int(response.headers.get("Content-Length", "0") or 0)
-            downloaded = 0
-            next_report = 10
+        try:
+            response = self.opener.open(request, timeout=60)
+        except HTTPError as exc:
+            if not offset or exc.code != 416:
+                raise
+            partial.unlink(missing_ok=True)
+            offset = 0
+            headers.pop("Range", None)
+            response = self.opener.open(Request(task.url, headers=headers), timeout=60)
+        append = offset > 0 and response.getcode() == 206
+        if append:
+            content_range = response.headers.get("Content-Range", "")
+            if not content_range.startswith(f"bytes {offset}-"):
+                response.close()
+                partial.unlink(missing_ok=True)
+                offset = 0
+                response = self.opener.open(Request(task.url, headers={k: v for k, v in headers.items() if k.lower() != "range"}), timeout=60)
+                append = False
+        else:
+            offset = 0
+        with response, partial.open("ab" if append else "wb") as output:
+            total = int(response.headers.get("Content-Length", "0") or 0) + offset
+            downloaded = offset
+            next_report = ((downloaded * 100 // total // 10) + 1) * 10 if total else 10
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -407,4 +530,5 @@ class VideoDownloader:
                         next_report = min(100, (percent // 10 + 1) * 10)
         partial.replace(target)
         self.mark_completed(media_key(task.url), str(target.resolve()))
+        self._emit_task(task, "download", "Completed")
         print(f"[DOWNLOAD COMPLETE] {target}", flush=True)

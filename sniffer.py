@@ -77,8 +77,27 @@ class VideoSniffer:
                             request = json.loads(line)
                             url = request.get("url")
                             if isinstance(url, str) and url.startswith(("http://", "https://")):
-                                print(f"[HLS REDOWNLOAD] {url}", flush=True)
-                                self.downloader.submit_hls(url, force=True)
+                                kind = request.get("kind")
+                                target = request.get("path") or None
+                                is_hls = kind == "hls" or urlsplit(url).path.lower().endswith(".m3u8")
+                                if is_hls:
+                                    print(f"[HLS REDOWNLOAD] {url}", flush=True)
+                                    headers = request.get("headers")
+                                    self.downloader.submit_hls(
+                                        url,
+                                        headers=headers if isinstance(headers, dict) else None,
+                                        force=True,
+                                        target_path=target,
+                                    )
+                                else:
+                                    print(f"[DOWNLOAD RESUME] {url}", flush=True)
+                                    headers = request.get("headers")
+                                    self.downloader.submit(
+                                        url,
+                                        headers=headers if isinstance(headers, dict) else None,
+                                        force=True,
+                                        target_path=target,
+                                    )
                         except (json.JSONDecodeError, AttributeError):
                             continue
             except OSError as exc:

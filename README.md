@@ -147,7 +147,7 @@ possible certificate pinning / unsupported traffic
 
 ## 隐私与安全
 
-捕获日志可能包含带签名、账号标识或短期凭据的 URL。不要公开分享 `logs/videos.log`。本工具仅用于你有权测试的流量和资源。
+捕获日志和 `logs/download_list.json` 可能包含带签名、账号标识或短期凭据的 URL；恢复清单还会保存 User-Agent、Referer、Origin 和 Accept 请求头（不保存 Cookie/Authorization）。不要公开分享这些文件。本工具仅用于你有权测试的流量和资源。
 ## 自动下载（第二阶段试验功能）
 
 可在 **Settings → Preferences...** 中开启自动下载；也可以手动在 `config.json` 中设置：
@@ -158,6 +158,8 @@ possible certificate pinning / unsupported traffic
 ```
 
 开启后，程序会把捕获到的 MP4/WebM/MOV 放入 `output/`，下载在后台进行，不阻塞微信播放；同一 URL 每次运行只排队一次，已存在的文件会跳过，未完成文件使用 `.part` 后缀。控制台会显示 `[DOWNLOAD START]`、进度和 `[DOWNLOAD COMPLETE]`。
+
+GUI 的下载列表保存在 `logs/download_list.json`，关闭并重新打开程序后会恢复。未完成的任务会标记为中断；选中后点击 **Continue / retry** 可继续处理。普通 MP4/WebM/MOV 若服务器支持 HTTP Range，会从 `.part` 续传；服务器不支持时会从头下载。M3U8/HLS 任务重试时会从头重新合成，签名 URL 若已过期，需要回到微信重新播放以捕获新链接。
 
 程序也会递归检查 JSON API 响应中的直接视频 URL。如果课程目录 API 已返回全部播放地址，可一次发现并下载；如果目录只返回课节 ID，仍需根据该站点详情接口展开。相关课程接口会保存到 `logs/course_api.jsonl` 供分析。该文件可能包含登录信息和个人数据，请勿分享。
 
